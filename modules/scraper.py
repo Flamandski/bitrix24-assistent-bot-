@@ -1,6 +1,7 @@
 """
 Модуль парсинга документации Bitrix24.
 Рекурсивно обходит сайт apidocs.bitrix24.ru, извлекая ссылки и контент.
+Использует BFS (обход в ширину) для полного покрытия документации.
 """
 
 import sys
@@ -24,7 +25,7 @@ START_URL = "https://apidocs.bitrix24.ru/api-reference/index.html"
 # Домен, в пределах которого парсим (не уходим на внешние сайты)
 ALLOWED_DOMAIN = "apidocs.bitrix24.ru"
 # Максимальное количество страниц для парсинга (для безопасности)
-MAX_PAGES = 20
+MAX_PAGES = 100
 
 
 def setup_driver():
@@ -150,24 +151,46 @@ def scrape_full_documentation():
     # Очередь для BFS
     queue = deque([START_URL])
     # Множество посещённых URL (защита от зацикливания)
-    visited = set(already_parsed)
+    visited = set()
     
     driver = setup_driver()
     success_count = 0
     error_count = 0
+    skipped_count = 0
     
     try:
         while queue and len(visited) < MAX_PAGES:
             url = queue.popleft()
             
-            # Пропускаем уже посещённые
-            if url in visited and url in already_parsed:
+            # Пропускаем только если URL уже посещён в этой сессии
+            if url in visited:
                 continue
             visited.add(url)
             
             print(f"\n[{len(visited)}/{MAX_PAGES}] 🌐 {url}")
             
-            # Извлекаем контент
+            # Проверяем, есть ли уже в БД
+            if url in already_parsed:
+                print(f"   ⏭️ Уже в БД, извлекаю только ссылки...")
+                # Всё равно нужно получить HTML для извлечения ссылок!
+                try:
+                    driver.get(url)
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+                    )
+                    html = driver.page_source
+                    new_links = extract_links_from_html(html, url)
+                    new_links = [link for link in new_links if link not in visited]
+                    if new_links:
+                        queue.extend(new_links)
+                        print(f"   🔗 Найдено новых ссылок: {len(new_links)} (в очереди: {len(queue)})")
+                    skipped_count += 1
+                except Exception as e:
+                    print(f"   ⚠️ Ошибка извлечения ссылок: {e}")
+                time.sleep(0.3)
+                continue
+            
+            # Если URL новый — извлекаем контент
             title, content, html = extract_content(driver, url)
             
             if not title or not content or len(content) < 100:
@@ -207,9 +230,11 @@ def scrape_full_documentation():
     print("\n" + "=" * 70)
     print("🎉 ПАРСИНГ ЗАВЕРШЁН!")
     print("=" * 70)
-    print(f"✅ Успешно сохранено: {success_count}")
+    print(f"✅ Успешно сохранено новых: {success_count}")
+    print(f"⏭️ Пропущено (уже в БД): {skipped_count}")
     print(f"❌ Пропущено с ошибками: {error_count}")
     print(f"📊 Всего обработано URL: {len(visited)}")
+    print(f"📚 Итого в базе данных: {len(get_already_parsed_urls())} страниц")
     print("=" * 70)
 
 
